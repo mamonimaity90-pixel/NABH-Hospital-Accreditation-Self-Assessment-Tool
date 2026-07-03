@@ -29,6 +29,55 @@ export default function App() {
   const [sessions, setSessions] = useState<EvaluationSession[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string>('');
 
+  // User identity / Active Profile session
+  const [currentUserEmail, setCurrentUserEmail] = useState<string>(() => {
+    return localStorage.getItem('nabh_current_user_email') || '';
+  });
+
+  const [currentUserProfile, setCurrentUserProfile] = useState<any>(() => {
+    const email = localStorage.getItem('nabh_current_user_email');
+    if (email) {
+      const emailLower = email.trim().toLowerCase();
+      const raw = localStorage.getItem('nabh_profile_' + emailLower);
+      if (raw) {
+        try {
+          return JSON.parse(raw);
+        } catch (e) {}
+      }
+      const legacyRaw = localStorage.getItem('nabh_current_user_profile');
+      if (legacyRaw) {
+        try {
+          const parsed = JSON.parse(legacyRaw);
+          if (parsed && parsed.emailId && parsed.emailId.trim().toLowerCase() === emailLower) {
+            return parsed;
+          }
+        } catch (e) {}
+      }
+    }
+    return null;
+  });
+
+  const [accessEmailInput, setAccessEmailInput] = useState<string>('');
+
+  const [allowedAdminEmails, setAllowedAdminEmails] = useState<string[]>(() => {
+    const raw = localStorage.getItem('nabh_allowed_admin_emails');
+    let emails: string[] = ['mamoni.maity90@gmail.com'];
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          emails = parsed;
+        }
+      } catch (e) {
+        // ignore
+      }
+    }
+    if (!emails.includes('mamoni.maity90@gmail.com')) {
+      emails.unshift('mamoni.maity90@gmail.com');
+    }
+    return emails;
+  });
+
   // Tab views state
   const [activeTab, setActiveTab] = useState<'checklist' | 'dashboard' | 'admin'>('checklist');
 
@@ -49,8 +98,22 @@ export default function App() {
     onConfirm: () => void;
   } | null>(null);
 
+  // Derive Admin Access
+  const isUserAdmin = currentUserEmail ? allowedAdminEmails.map(e => e.trim().toLowerCase()).includes(currentUserEmail.trim().toLowerCase()) : false;
+
   // Admin authentication states
-  const [isAdminAuthenticated, setIsAdminAuthenticated] = useState<boolean>(false);
+  const [isAdminAuthenticated, setIsAdminAuthenticated] = useState<boolean>(() => {
+    const email = localStorage.getItem('nabh_current_user_email') || '';
+    const rawAdmins = localStorage.getItem('nabh_allowed_admin_emails');
+    let admins = ['mamoni.maity90@gmail.com'];
+    if (rawAdmins) {
+      try {
+        const parsed = JSON.parse(rawAdmins);
+        if (Array.isArray(parsed)) admins = parsed;
+      } catch (e) {}
+    }
+    return email ? admins.map(e => e.toLowerCase()).includes(email.toLowerCase()) : false;
+  });
   const [adminPasscodeInput, setAdminPasscodeInput] = useState<string>('');
   const [adminLoginError, setAdminLoginError] = useState<string>('');
 
@@ -185,10 +248,58 @@ export default function App() {
     setSessions(loadedSessions);
 
     // Pick active session
-    if (storedActiveSessionId && loadedSessions.find(s => s.id === storedActiveSessionId)) {
-      setCurrentSessionId(storedActiveSessionId);
-    } else if (loadedSessions.length > 0) {
-      setCurrentSessionId(loadedSessions[0].id);
+    const activeEmail = localStorage.getItem('nabh_current_user_email') || '';
+    const storedAdminsRaw = localStorage.getItem('nabh_allowed_admin_emails');
+    let adminEmailsList = ['mamoni.maity90@gmail.com'];
+    if (storedAdminsRaw) {
+      try {
+        const parsed = JSON.parse(storedAdminsRaw);
+        if (Array.isArray(parsed)) adminEmailsList = parsed;
+      } catch (e) {}
+    }
+    const isAdmin = activeEmail ? adminEmailsList.map(e => e.toLowerCase()).includes(activeEmail.toLowerCase()) : false;
+
+    if (isAdmin) {
+      // Admins can view any active session, default to stored or first
+      if (storedActiveSessionId && loadedSessions.find(s => s.id === storedActiveSessionId)) {
+        setCurrentSessionId(storedActiveSessionId);
+      } else if (loadedSessions.length > 0) {
+        setCurrentSessionId(loadedSessions[0].id);
+      }
+    } else if (activeEmail) {
+      // Normal hospital user should load their own session
+      const ownSession = loadedSessions.find(s => s.emailId.trim().toLowerCase() === activeEmail.trim().toLowerCase());
+      if (ownSession) {
+        setCurrentSessionId(ownSession.id);
+      } else {
+        // Create session on-demand if logged in but missing
+        const profileRaw = localStorage.getItem('nabh_current_user_profile');
+        let profile = { hospitalName: 'My Hospital', contactName: '', contactNumber: '', city: '' };
+        if (profileRaw) {
+          try {
+            profile = JSON.parse(profileRaw);
+          } catch (e) {}
+        }
+        const newSessId = `session_user_${Date.now()}`;
+        const newSess: EvaluationSession = {
+          id: newSessId,
+          hospitalName: profile.hospitalName || 'My Hospital',
+          contactName: profile.contactName || '',
+          contactNumber: profile.contactNumber || '',
+          emailId: activeEmail,
+          city: profile.city || '',
+          startedAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          isCompleted: false,
+          answers: {}
+        };
+        loadedSessions.unshift(newSess);
+        setSessions([...loadedSessions]);
+        setCurrentSessionId(newSessId);
+      }
+    } else {
+      // No active email, will display registration/login page
+      setCurrentSessionId('');
     }
 
     // Force persist clean migrated state so the old cache is wiped immediately
@@ -223,6 +334,12 @@ export default function App() {
       localStorage.setItem('nabh_active_session_id', currentSessionId);
     }
   }, [currentSessionId]);
+
+  useEffect(() => {
+    if (allowedAdminEmails.length > 0) {
+      localStorage.setItem('nabh_allowed_admin_emails', JSON.stringify(allowedAdminEmails));
+    }
+  }, [allowedAdminEmails]);
 
   // Handle single question answer update
   const handleUpdateAnswer = (criterionId: string, updates: Partial<CriterionAnswer>) => {
@@ -277,7 +394,26 @@ export default function App() {
     e.preventDefault();
     if (!newHospitalName.trim() || !newContactName.trim() || !newContactNumber.trim() || !newEmailId.trim() || !newCity.trim()) return;
 
+    const email = newEmailId.trim().toLowerCase();
+
     if (isEditingProfile && currentSessionId) {
+      const updatedProfile = {
+        hospitalName: newHospitalName.trim(),
+        contactName: newContactName.trim(),
+        contactNumber: newContactNumber.trim(),
+        emailId: email,
+        city: newCity.trim(),
+      };
+
+      // If updating our logged in user profile, save in states/storage
+      const currentActiveEmail = sessions.find(s => s.id === currentSessionId)?.emailId || '';
+      if (currentUserEmail && currentActiveEmail.toLowerCase() === currentUserEmail.toLowerCase()) {
+        localStorage.setItem('nabh_current_user_email', email);
+        localStorage.setItem('nabh_current_user_profile', JSON.stringify(updatedProfile));
+        setCurrentUserEmail(email);
+        setCurrentUserProfile(updatedProfile);
+      }
+
       setSessions(prev => prev.map(s => {
         if (s.id === currentSessionId) {
           return {
@@ -285,7 +421,7 @@ export default function App() {
             hospitalName: newHospitalName.trim(),
             contactName: newContactName.trim(),
             contactNumber: newContactNumber.trim(),
-            emailId: newEmailId.trim(),
+            emailId: email,
             city: newCity.trim(),
             updatedAt: new Date().toISOString()
           };
@@ -301,7 +437,7 @@ export default function App() {
         hospitalName: newHospitalName.trim(),
         contactName: newContactName.trim(),
         contactNumber: newContactNumber.trim(),
-        emailId: newEmailId.trim(),
+        emailId: email,
         city: newCity.trim(),
         startedAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
@@ -319,6 +455,142 @@ export default function App() {
       setShowSessionCreator(false);
       setActiveTab('checklist');
     }
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem('nabh_current_user_email');
+    localStorage.removeItem('nabh_current_user_profile');
+    localStorage.removeItem('nabh_active_session_id');
+    setCurrentUserEmail('');
+    setCurrentUserProfile(null);
+    setCurrentSessionId('');
+    setIsAdminAuthenticated(false);
+    setActiveTab('checklist');
+    setAccessEmailInput('');
+  };
+
+  const handleEmailAccess = (e: React.FormEvent) => {
+    e.preventDefault();
+    const email = accessEmailInput.trim().toLowerCase();
+    if (!email) return;
+
+    localStorage.setItem('nabh_current_user_email', email);
+    setCurrentUserEmail(email);
+
+    // Check if this user is an admin
+    const isAdmin = allowedAdminEmails.map(ae => ae.trim().toLowerCase()).includes(email);
+    setIsAdminAuthenticated(isAdmin);
+
+    if (isAdmin) {
+      // Pick active session
+      const storedActiveSessionId = localStorage.getItem('nabh_active_session_id');
+      if (storedActiveSessionId && sessions.find(s => s.id === storedActiveSessionId)) {
+        setCurrentSessionId(storedActiveSessionId);
+      } else if (sessions.length > 0) {
+        setCurrentSessionId(sessions[0].id);
+      } else {
+        setCurrentSessionId('');
+      }
+      setActiveTab('checklist');
+    } else {
+      // Normal hospital user
+      const rawProfile = localStorage.getItem('nabh_profile_' + email);
+      if (rawProfile) {
+        try {
+          const profile = JSON.parse(rawProfile);
+          setCurrentUserProfile(profile);
+          
+          const existingSession = sessions.find(s => s.emailId.trim().toLowerCase() === email);
+          if (existingSession) {
+            setCurrentSessionId(existingSession.id);
+          } else {
+            const newSessId = `session_user_${Date.now()}`;
+            const newSessionState: EvaluationSession = {
+              id: newSessId,
+              hospitalName: profile.hospitalName,
+              contactName: profile.contactName,
+              contactNumber: profile.contactNumber,
+              emailId: email,
+              city: profile.city,
+              startedAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+              isCompleted: false,
+              answers: {}
+            };
+            setSessions(prev => [newSessionState, ...prev]);
+            setCurrentSessionId(newSessId);
+          }
+          setActiveTab('checklist');
+        } catch (err) {
+          setCurrentUserProfile(null);
+          setCurrentSessionId('');
+          setNewEmailId(email);
+        }
+      } else {
+        setCurrentUserProfile(null);
+        setCurrentSessionId('');
+        setNewEmailId(email);
+      }
+    }
+  };
+
+  const handleRegisterUser = (e: React.FormEvent, registrationData: {
+    hospitalName: string;
+    contactName: string;
+    contactNumber: string;
+    emailId: string;
+    city: string;
+  }) => {
+    e.preventDefault();
+    const email = registrationData.emailId.trim().toLowerCase();
+    if (!email) return;
+
+    const profile = {
+      hospitalName: registrationData.hospitalName.trim(),
+      contactName: registrationData.contactName.trim(),
+      contactNumber: registrationData.contactNumber.trim(),
+      emailId: email,
+      city: registrationData.city.trim(),
+    };
+
+    localStorage.setItem('nabh_current_user_email', email);
+    localStorage.setItem('nabh_profile_' + email, JSON.stringify(profile));
+    localStorage.setItem('nabh_current_user_profile', JSON.stringify(profile));
+    setCurrentUserEmail(email);
+    setCurrentUserProfile(profile);
+
+    // Check if an evaluation session already exists for this email
+    const existingSession = sessions.find(s => s.emailId.trim().toLowerCase() === email);
+    if (existingSession) {
+      setCurrentSessionId(existingSession.id);
+    } else {
+      // Create a brand new session matching this profile
+      const newSessId = `session_user_${Date.now()}`;
+      const newSessionState: EvaluationSession = {
+        id: newSessId,
+        hospitalName: profile.hospitalName,
+        contactName: profile.contactName,
+        contactNumber: profile.contactNumber,
+        emailId: email,
+        city: profile.city,
+        startedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        isCompleted: false,
+        answers: {}
+      };
+
+      setSessions(prev => [newSessionState, ...prev]);
+      setCurrentSessionId(newSessId);
+    }
+
+    const isAdmin = allowedAdminEmails.map(ae => ae.trim().toLowerCase()).includes(email);
+    setIsAdminAuthenticated(isAdmin);
+    setActiveTab('checklist');
+    setNewHospitalName('');
+    setNewContactName('');
+    setNewContactNumber('');
+    setNewEmailId('');
+    setNewCity('');
   };
 
   const handleDeleteSession = (sessionId: string) => {
@@ -420,8 +692,197 @@ export default function App() {
         </div>
       </div>
 
-      {/* 2. Sticky Navigation Bar (Deep Navy Blue matching nabh.co) */}
-      <header className="bg-[#002f56] border-b border-[#f2a900]/30 sticky top-0 z-40 shadow-md" id="top-navbar-hdr">
+      {/* 2. Sticky Navigation Bar & Content */}
+      {!currentUserEmail ? (
+        <main className="flex-1 max-w-4xl w-full mx-auto px-4 py-12 flex flex-col items-center justify-center">
+          <div className="bg-white w-full rounded-2xl border border-slate-200/80 shadow-xl overflow-hidden animate-fade-in grid grid-cols-1 md:grid-cols-12">
+            {/* Left side info block */}
+            <div className="md:col-span-5 bg-[#002f56] p-8 text-white flex flex-col justify-between border-r border-slate-100">
+              <div className="space-y-6">
+                <span className="px-2 py-1 bg-[#f2a900] text-[#002f56] text-[9px] font-black uppercase tracking-widest rounded">
+                  NABH Portal
+                </span>
+                <div className="space-y-2">
+                  <h2 className="text-lg font-black leading-tight text-white font-sans uppercase tracking-tight">
+                    NABH ACCREDITATION SELF-ASSESSMENT PORTAL
+                  </h2>
+                  <p className="text-[11px] text-slate-300 leading-relaxed">
+                    Access standard checklists, map accreditation gaps, and generate automated corrective action plans for hospital compliance audits.
+                  </p>
+                </div>
+
+                <div className="space-y-4 pt-4 border-t border-white/10 text-[11px]">
+                  <div className="flex gap-2.5">
+                    <span className="text-[#f2a900] font-black">✓</span>
+                    <span className="text-slate-200">Standard NABH compliance chapters</span>
+                  </div>
+                  <div className="flex gap-2.5">
+                    <span className="text-[#f2a900] font-black">✓</span>
+                    <span className="text-slate-200">Real-time gap-analysis graphs</span>
+                  </div>
+                  <div className="flex gap-2.5">
+                    <span className="text-[#f2a900] font-black">✓</span>
+                    <span className="text-slate-200">Immutable corrective action directives</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Right side form: ONLY email input */}
+            <div className="md:col-span-7 p-8 col-span-1 flex flex-col justify-center">
+              <h3 className="text-sm font-black uppercase tracking-widest text-slate-800 border-b pb-3 mb-6 flex items-center gap-2">
+                <span className="p-1.5 bg-[#002f56]/5 text-[#002f56] rounded-full text-xs">🔑</span>
+                Sign In / Access Portal
+              </h3>
+
+              <form 
+                onSubmit={handleEmailAccess}
+                className="space-y-5 text-xs"
+              >
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-500 mb-1.5 uppercase">Enter Your Email Address *</label>
+                  <input
+                    type="email"
+                    required
+                    placeholder="e.g. colleague@hospital.org"
+                    value={accessEmailInput}
+                    onChange={e => setAccessEmailInput(e.target.value)}
+                    className="w-full text-xs px-3 py-2.5 border border-slate-200 rounded-lg outline-hidden focus:border-[#002f56] font-mono"
+                  />
+                </div>
+
+                <div className="bg-[#002f56]/5 p-3.5 rounded-lg border border-[#002f56]/10 text-[10px] text-slate-600 leading-relaxed">
+                  <strong>Access Policy:</strong> Authorized administrative emails automatically unlock question editing, checklist configuration, and global registry access. Hospital users can create, complete, and download custom self-assessment reports.
+                </div>
+
+                <button
+                  type="submit"
+                  className="w-full py-2.5 bg-[#002f56] hover:bg-[#002f56]/90 text-[#f2a900] font-black uppercase tracking-wider rounded-lg transition-all text-[11px] cursor-pointer shadow-md"
+                >
+                  Continue to Portal
+                </button>
+              </form>
+            </div>
+          </div>
+        </main>
+      ) : (!currentUserProfile && !isUserAdmin) ? (
+        <main className="flex-1 max-w-4xl w-full mx-auto px-4 py-12 flex flex-col items-center justify-center animate-fade-in">
+          <div className="bg-white w-full rounded-2xl border border-slate-200/80 shadow-xl overflow-hidden grid grid-cols-1 md:grid-cols-12">
+            {/* Left side info block */}
+            <div className="md:col-span-5 bg-[#002f56] p-8 text-white flex flex-col justify-between border-r border-slate-100">
+              <div className="space-y-6">
+                <span className="px-2 py-1 bg-[#f2a900] text-[#002f56] text-[9px] font-black uppercase tracking-widest rounded">
+                  NABH Portal
+                </span>
+                <div className="space-y-2">
+                  <h2 className="text-lg font-black leading-tight text-white font-sans uppercase tracking-tight">
+                    HOSPITAL PROFILE SETUP
+                  </h2>
+                  <p className="text-[11px] text-slate-300 leading-relaxed">
+                    First-time visitor profile registration. Please complete your hospital details to activate your self-assessment workspace.
+                  </p>
+                </div>
+
+                <div className="p-3 bg-white/5 border border-white/10 rounded-lg text-[11px] font-mono space-y-1">
+                  <div className="text-slate-400">Logged in email ID:</div>
+                  <div className="text-amber-300 font-bold truncate">{currentUserEmail}</div>
+                </div>
+              </div>
+
+              <div className="pt-6">
+                <button
+                  onClick={handleLogout}
+                  className="w-full py-2 bg-rose-600 hover:bg-rose-700 text-white font-bold uppercase text-[10px] tracking-wider rounded transition-colors cursor-pointer"
+                >
+                  Change Email ID
+                </button>
+              </div>
+            </div>
+
+            {/* Right side form */}
+            <div className="md:col-span-7 p-8 col-span-1">
+              <h3 className="text-sm font-black uppercase tracking-widest text-slate-800 border-b pb-3 mb-6 flex items-center gap-2">
+                <span className="p-1.5 bg-[#002f56]/5 text-[#002f56] rounded-full text-xs">🏥</span>
+                Complete Hospital Profile
+              </h3>
+
+              <form 
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  if (!newHospitalName.trim() || !newContactName.trim() || !newContactNumber.trim() || !newCity.trim()) return;
+                  handleRegisterUser(e, {
+                    hospitalName: newHospitalName.trim(),
+                    contactName: newContactName.trim(),
+                    contactNumber: newContactNumber.trim(),
+                    emailId: currentUserEmail,
+                    city: newCity.trim(),
+                  });
+                }}
+                className="space-y-4 text-xs"
+              >
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-500 mb-1 uppercase">Hospital Name *</label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="e.g. Apollo Hospital Delhi"
+                    value={newHospitalName}
+                    onChange={e => setNewHospitalName(e.target.value)}
+                    className="w-full text-xs px-3 py-2 border border-slate-200 rounded-lg outline-hidden focus:border-[#002f56]"
+                  />
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 mb-1 uppercase">Contact Submitter Name *</label>
+                    <input
+                      type="text"
+                      required
+                      placeholder="e.g. Dr. Satish Kumar"
+                      value={newContactName}
+                      onChange={e => setNewContactName(e.target.value)}
+                      className="w-full text-xs px-3 py-2 border border-slate-200 rounded-lg outline-hidden focus:border-[#002f56]"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 mb-1 uppercase">City *</label>
+                    <input
+                      type="text"
+                      required
+                      placeholder="e.g. New Delhi"
+                      value={newCity}
+                      onChange={e => setNewCity(e.target.value)}
+                      className="w-full text-xs px-3 py-2 border border-slate-200 rounded-lg outline-hidden focus:border-[#002f56]"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-500 mb-1 uppercase">Contact Mobile Number *</label>
+                  <input
+                    type="tel"
+                    required
+                    placeholder="e.g. +91 98765 43210"
+                    value={newContactNumber}
+                    onChange={e => setNewContactNumber(e.target.value)}
+                    className="w-full text-xs px-3 py-2 border border-slate-200 rounded-lg outline-hidden focus:border-[#002f56] font-mono"
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  className="w-full py-2.5 bg-[#002f56] hover:bg-[#002f56]/90 text-[#f2a900] font-black uppercase tracking-wider rounded-lg transition-all text-[11px] cursor-pointer shadow-md"
+                >
+                  Activate Self-Assessment & Begin
+                </button>
+              </form>
+            </div>
+          </div>
+        </main>
+      ) : (
+        <>
+          {/* 2. Sticky Navigation Bar (Deep Navy Blue matching nabh.co) */}
+          <header className="bg-[#002f56] border-b border-[#f2a900]/30 sticky top-0 z-40 shadow-md" id="top-navbar-hdr">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-2 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           
           {/* Left Title Indicator */}
@@ -458,18 +919,20 @@ export default function App() {
               <BarChart3 className={`w-3.5 h-3.5 ${activeTab === 'dashboard' ? 'text-[#002f56]' : 'text-[#f2a900]'}`} />
               <span>PREPAREDNESS REPORT</span>
             </button>
-            <button
-              onClick={() => setActiveTab('admin')}
-              className={`flex items-center gap-1.5 px-3 sm:px-4 py-1.5 text-xs font-bold rounded transition-all cursor-pointer ${
-                activeTab === 'admin'
-                  ? 'bg-[#f2a900] text-[#002f56] shadow-sm font-black'
-                  : 'text-white/85 hover:text-white hover:bg-white/10 font-black'
-              }`}
-              id="tab-btn-admin"
-            >
-              <Settings2 className={`w-3.5 h-3.5 ${activeTab === 'admin' ? 'text-[#002f56]' : 'text-[#f2a900]'}`} />
-              <span>CONFIG CONSOLE</span>
-            </button>
+            {isUserAdmin && (
+              <button
+                onClick={() => setActiveTab('admin')}
+                className={`flex items-center gap-1.5 px-3 sm:px-4 py-1.5 text-xs font-bold rounded transition-all cursor-pointer ${
+                  activeTab === 'admin'
+                    ? 'bg-[#f2a900] text-[#002f56] shadow-sm font-black'
+                    : 'text-white/85 hover:text-white hover:bg-white/10 font-black'
+                }`}
+                id="tab-btn-admin"
+              >
+                <Settings2 className={`w-3.5 h-3.5 ${activeTab === 'admin' ? 'text-[#002f56]' : 'text-[#f2a900]'}`} />
+                <span>CONFIG CONSOLE</span>
+              </button>
+            )}
           </div>
         </div>
       </header>
@@ -497,14 +960,14 @@ export default function App() {
                   <span className="font-bold text-slate-200">{activeSessionDetails.contactNumber}</span>
                 </>
               ) : (
-                <span className="text-rose-400 font-extrabold">No Profile Loaded</span>
+                <span className="text-rose-400 font-extrabold uppercase">No Profile Loaded</span>
               )}
             </div>
           </div>
 
           {/* Right: Hospital Selection Dropdown Menu & Create Actions */}
           <div className="flex items-center gap-3 flex-wrap">
-            {activeTab === 'admin' && isAdminAuthenticated && (
+            {isUserAdmin && (
               <div className="flex items-center gap-2">
                 <span className="text-slate-300 uppercase tracking-widest font-black text-[10px]">Switch Session:</span>
                 <select
@@ -513,7 +976,7 @@ export default function App() {
                     setCurrentSessionId(e.target.value);
                     setShowSessionCreator(false);
                   }}
-                  className="bg-nabh-navy-light text-white border border-nabh-gold/30 rounded font-bold px-2 py-1 text-xs focus:ring-1 focus:ring-nabh-gold outline-hidden"
+                  className="bg-slate-800 text-white border border-[#f2a900]/30 rounded font-bold px-2 py-1 text-xs focus:ring-1 focus:ring-[#f2a900] outline-hidden cursor-pointer"
                 >
                   {sessions.map(s => (
                     <option key={s.id} value={s.id}>
@@ -561,14 +1024,14 @@ export default function App() {
                       }
                     });
                   }}
-                  className="px-3 py-1 bg-[#f2a900]/15 hover:bg-[#f2a900]/25 border border-[#f2a900]/40 text-[#f2a900] rounded text-[11px] font-bold uppercase tracking-wider flex items-center gap-1 cursor-pointer transition-all animate-pulse"
+                  className="px-3 py-1 bg-[#f2a900]/15 hover:bg-[#f2a900]/25 border border-[#f2a900]/40 text-[#f2a900] rounded text-[11px] font-bold uppercase tracking-wider flex items-center gap-1 cursor-pointer transition-all"
                 >
                   <Plus className="w-3.5 h-3.5 text-[#f2a900]" /> Restart Answers
                 </button>
               </>
             )}
 
-            {activeTab === 'admin' && (
+            {isUserAdmin && (
               <button
                 onClick={() => {
                   setNewHospitalName('');
@@ -582,6 +1045,15 @@ export default function App() {
                 className="px-3 py-1 bg-[#f2a900] hover:bg-[#f2a900]/90 text-slate-950 rounded text-[11px] font-black uppercase tracking-wider flex items-center gap-1 cursor-pointer transition-colors"
               >
                 <Plus className="w-3.5 h-3.5 text-slate-950 font-black" /> Add New Session
+              </button>
+            )}
+
+            {currentUserEmail && (
+              <button
+                onClick={handleLogout}
+                className="px-3 py-1 bg-rose-600/15 hover:bg-rose-600/25 border border-rose-500/40 text-rose-300 hover:text-white rounded text-[11px] font-extrabold uppercase tracking-wider flex items-center gap-1 cursor-pointer transition-all"
+              >
+                Sign Out
               </button>
             )}
           </div>
@@ -817,6 +1289,22 @@ export default function App() {
                       setActiveTab('dashboard'); // Switch immediately to the Preparedness Report tab!
                     }}
                     onDeleteSession={handleDeleteSession}
+                    currentUserEmail={currentUserEmail}
+                    allowedAdminEmails={allowedAdminEmails}
+                    onAddAdminEmail={(email) => {
+                      setAllowedAdminEmails(prev => {
+                        const next = [...prev, email];
+                        localStorage.setItem('nabh_allowed_admin_emails', JSON.stringify(next));
+                        return next;
+                      });
+                    }}
+                    onRemoveAdminEmail={(email) => {
+                      setAllowedAdminEmails(prev => {
+                        const next = prev.filter(e => e !== email);
+                        localStorage.setItem('nabh_allowed_admin_emails', JSON.stringify(next));
+                        return next;
+                      });
+                    }}
                   />
                 </div>
               )
@@ -824,6 +1312,8 @@ export default function App() {
           </div>
         )}
       </main>
+    </>
+  )}
 
       {/* 5. Rich Official NABH & QCI Corporate Footer */}
       <footer className="bg-[#002f56] text-white border-t-4 border-[#f2a900] py-10 mt-auto text-xs" id="simple-footer">
