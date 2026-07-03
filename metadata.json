@@ -1,0 +1,6 @@
+{
+  "name": "NABH Hospital Accreditation Compliance Tracker",
+  "description": "An interactive assessment and gap-analysis tool for hospitals targeting the NABH Hospital Accreditation, featuring standards compliance checklists, real-time chapter metrics, visual dashboards, dynamic action priority planning, and an admin dashboard with question configuration and excel criteria uploads.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
